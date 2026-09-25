@@ -1,0 +1,38 @@
+============================================================
+AMAZON ML CHALLENGE: DATA INSPECTION REPORT
+============================================================
+
+--- Source 1 (Train) ---
+Rows: 2,206,821, Columns: 4 (['entity_id', 'business_name', 'business_address', 'country'])
+Duplicate entity IDs: 0
+Country Distribution:
+country
+US       1323633
+India     883188
+Unique Business Names: 1,539,229
+Unique Addresses: 2,130,606
+
+--- Source 2 (Train) ---
+Rows: 5,034,616, Columns: 4 (['entity_id', 'business_name', 'business_address', 'country'])
+Duplicate entity IDs: 0
+Country Distribution:
+country
+US       3016817
+India    2017799
+Unique Business Names: 4,402,009
+Unique Addresses: 4,337,262
+
+--- Source 3 (Train) ---
+Rows: 5,285,603, Columns: 4 (['entity_id', 'business_name', 'business_address', 'country'])
+Duplicate entity IDs: 0
+Country Distribution:
+country
+US       3170056
+India    2115547
+Unique Business Names: 4,651,609
+Unique Addresses: 4,632,765
+
+--- Ground Truth Statistics ---
+Total Source 1 entities: 2,206,821
+Singletons (0 matches): 123,247 (5.58%)
+Non-singletons: 2,083,574 (94.42%)

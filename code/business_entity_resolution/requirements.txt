@@ -1,0 +1,28 @@
+﻿# Business Entity Resolution - Requirements
+# ==========================================
+# Install with: pip install -r requirements.txt
+# All packages are MIT or Apache 2.0 licensed.
+
+# Core scientific computing
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.11.0
+
+# Machine Learning
+scikit-learn>=1.3.0    # TF-IDF, train/test split, calibration
+lightgbm>=4.0.0        # MIT license - Gradient Boosted Decision Trees (matching model)
+xgboost>=2.0.0         # Apache 2.0 - optional alternative to LightGBM
+
+# String similarity
+rapidfuzz>=3.0.0       # MIT license - Fast Levenshtein, Jaro-Winkler, token similarity
+
+# Embeddings (BAAI/bge-small-en-v1.5: MIT license, 33M params, <<8B limit)
+sentence-transformers>=2.0.0   # Apache 2.0
+torch>=2.0.0                   # BSD license (pre-installed)
+transformers>=4.0.0            # Apache 2.0
+
+# Approximate nearest neighbor search
+faiss-cpu>=1.7.0       # MIT license - Facebook AI Similarity Search
+
+# Utilities
+tqdm>=4.0.0            # MIT license

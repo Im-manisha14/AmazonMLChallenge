@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large dataset files (stored locally, strictly not committed to Git)
+dataset/
+*.tsv
+!artifacts/data_report.txt
+
+# Scratch and temporary directories
+artifacts/scratch/
+artifacts/validation_predictions.tsv
+
+# OS generated files
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# Environment / IDE
+.venv/
+env/
+.idea/
+.vscode/
