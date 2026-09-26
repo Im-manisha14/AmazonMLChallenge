@@ -45,88 +45,113 @@ def clean_series(s: pd.Series) -> pd.Series:
     s = s.str.replace(r'[^\w\s]', ' ', regex=True)
     return s.str.replace(r'\s+', ' ', regex=True).str.strip()
 
+def extract_street_word(na_series: pd.Series) -> pd.Series:
+    no_num = na_series.str.replace(r'\b\d+\b', '', regex=True)
+    return no_num.str.split().str[0].fillna("")
+
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["nn"] = clean_series(df["business_name"])
     df["na"] = clean_series(df["business_address"])
     df["nc"] = df["country"].fillna("").astype(str).str.lower().str.strip()
     df["tok0"] = df["nn"].str.split().str[0].fillna("")
-    df["pref4"] = df["nn"].str[:4].fillna("")
-    df["pref3"] = df["nn"].str[:3].fillna("")
+    df["tok1"] = df["nn"].str.split().str[1].fillna("")
     df["postal"] = df["na"].str.extract(r'\b(\d{5,6})\b', expand=False).fillna("")
+    df["street_num"] = df["na"].str.extract(r'\b(\d{1,6})\b', expand=False).fillna("")
+    df["street_word"] = extract_street_word(df["na"])
+    df["sorted_words"] = df["nn"].apply(lambda s: "_".join(sorted(s.split()[:3])) if s else "")
     return df
 
 def build_country_blocking_indexes(s2_df: pd.DataFrame, s3_df: pd.DataFrame):
-    idx_tok0 = defaultdict(list)
+    idx_addr_num_street = defaultdict(list)
+    idx_addr_num_post = defaultdict(list)
+    idx_name_sorted = defaultdict(list)
     idx_tok01 = defaultdict(list)
+    idx_tok0_post = defaultdict(list)
+    idx_tok0_num = defaultdict(list)
     idx_pref4 = defaultdict(list)
-    idx_postal = defaultdict(list)
-    idx_pref3 = defaultdict(list)
     
     for df in (s2_df, s3_df):
         eids = df["entity_id"].values
-        nns = df["nn"].values
         tok0s = df["tok0"].values
-        pref4s = df["pref4"].values
-        pref3s = df["pref3"].values
+        tok1s = df["tok1"].values
         postals = df["postal"].values
+        street_nums = df["street_num"].values
+        street_words = df["street_word"].values
+        sorted_wordss = df["sorted_words"].values
+        nns = df["nn"].values
         
         for i in range(len(eids)):
             eid = eids[i]
             t0 = tok0s[i]
-            p4 = pref4s[i]
-            p3 = pref3s[i]
+            t1 = tok1s[i]
             post = postals[i]
+            snum = street_nums[i]
+            sword = street_words[i]
+            swords = sorted_wordss[i]
             name = nns[i]
             
-            if t0:
-                idx_tok0[t0].append(eid)
-            if p4:
-                idx_pref4[p4].append(eid)
-            if p3:
-                idx_pref3[p3].append(eid)
-            if post:
-                idx_postal[post].append(eid)
+            # Address blocking (solves trade names / DBA)
+            if snum and sword:
+                idx_addr_num_street[f"{snum}_{sword}"].append(eid)
+            if snum and post:
+                idx_addr_num_post[f"{snum}_{post}"].append(eid)
                 
-            toks = name.split(maxsplit=2)
-            if len(toks) >= 2:
-                idx_tok01[f"{toks[0]}|{toks[1]}"].append(eid)
+            # Name blocking (solves word reordering & abbreviations)
+            if swords:
+                idx_name_sorted[swords].append(eid)
+            if t0 and t1:
+                idx_tok01[f"{t0}_{t1}"].append(eid)
+            if t0 and post:
+                idx_tok0_post[f"{t0}_{post}"].append(eid)
+            if t0 and snum:
+                idx_tok0_num[f"{t0}_{snum}"].append(eid)
+            if len(name) >= 4:
+                idx_pref4[name[:4]].append(eid)
                 
-    return idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3
+    return idx_addr_num_street, idx_addr_num_post, idx_name_sorted, idx_tok01, idx_tok0_post, idx_tok0_num, idx_pref4
 
-def retrieve_candidates_batch(s1_batch: pd.DataFrame, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=12):
+def retrieve_candidates_batch(s1_batch: pd.DataFrame, idx_addr_num_street, idx_addr_num_post, idx_name_sorted, idx_tok01, idx_tok0_post, idx_tok0_num, idx_pref4, max_per_s1=15):
     eids = s1_batch["entity_id"].values
-    nns = s1_batch["nn"].values
     tok0s = s1_batch["tok0"].values
-    pref4s = s1_batch["pref4"].values
-    pref3s = s1_batch["pref3"].values
+    tok1s = s1_batch["tok1"].values
     postals = s1_batch["postal"].values
+    street_nums = s1_batch["street_num"].values
+    street_words = s1_batch["street_word"].values
+    sorted_wordss = s1_batch["sorted_words"].values
+    nns = s1_batch["nn"].values
     
     candidates = {}
     for i in range(len(eids)):
         sid = eids[i]
         t0 = tok0s[i]
-        p4 = pref4s[i]
-        p3 = pref3s[i]
+        t1 = tok1s[i]
         post = postals[i]
+        snum = street_nums[i]
+        sword = street_words[i]
+        swords = sorted_wordss[i]
         name = nns[i]
         
         c_set = set()
-        if t0:
-            c_set.update(idx_tok0.get(t0, [])[:10])
+        # High precision address matches
+        if snum and sword:
+            c_set.update(idx_addr_num_street.get(f"{snum}_{sword}", [])[:10])
+        if snum and post:
+            c_set.update(idx_addr_num_post.get(f"{snum}_{post}", [])[:10])
             
-        toks = name.split(maxsplit=2)
-        if len(toks) >= 2:
-            c_set.update(idx_tok01.get(f"{toks[0]}|{toks[1]}", [])[:8])
+        # High precision name matches
+        if swords:
+            c_set.update(idx_name_sorted.get(swords, [])[:10])
+        if t0 and t1:
+            c_set.update(idx_tok01.get(f"{t0}_{t1}", [])[:10])
+        if t0 and post:
+            c_set.update(idx_tok0_post.get(f"{t0}_{post}", [])[:10])
+        if t0 and snum:
+            c_set.update(idx_tok0_num.get(f"{t0}_{snum}", [])[:10])
             
-        if p4:
-            c_set.update(idx_pref4.get(p4, [])[:8])
-            
-        if post:
-            c_set.update(idx_postal.get(post, [])[:8])
-            
-        if len(c_set) == 0 and p3:
-            c_set.update(idx_pref3.get(p3, [])[:6])
+        # Fallback if empty
+        if len(c_set) == 0 and len(name) >= 4:
+            c_set.update(idx_pref4.get(name[:4], [])[:10])
             
         candidates[sid] = list(c_set)[:max_per_s1]
         
@@ -325,7 +350,7 @@ def run_test_inference_and_validate():
         
         # Build inverted blocking indexes
         log(f"  Building blocking indexes for '{country}'...")
-        idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3 = build_country_blocking_indexes(c_s2, c_s3)
+        idx_addr_num_street, idx_addr_num_post, idx_name_sorted, idx_tok01, idx_tok0_post, idx_tok0_num, idx_pref4 = build_country_blocking_indexes(c_s2, c_s3)
         del c_s2, c_s3, c_all_cands_df
         gc.collect()
         
@@ -339,7 +364,7 @@ def run_test_inference_and_validate():
                 b_df = c_s1.iloc[b_st:b_en]
                 
                 # 1. Retrieve candidates
-                c_map = retrieve_candidates_batch(b_df, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=12)
+                c_map = retrieve_candidates_batch(b_df, idx_addr_num_street, idx_addr_num_post, idx_name_sorted, idx_tok01, idx_tok0_post, idx_tok0_num, idx_pref4, max_per_s1=15)
                 
                 # 2. Fast feature extraction
                 s1_dict = b_df.set_index("entity_id")[["nn", "na", "nc", "postal"]].to_dict("index")
@@ -347,13 +372,24 @@ def run_test_inference_and_validate():
                 
                 # 3. Model scoring
                 b_matches = defaultdict(list)
+                b_best_cand = {}
                 if X is not None and len(X) > 0:
                     scores = model.predict_proba(X)[:, 1]
                     for p_idx, score in enumerate(scores):
+                        sid, cid = pairs[p_idx]
+                        if sid not in b_best_cand or score > b_best_cand[sid][0]:
+                            b_best_cand[sid] = (score, cid)
                         if score >= threshold:
-                            sid, cid = pairs[p_idx]
                             b_matches[sid].append(cid)
                             country_matches_found += 1
+                            
+                    # Singleton suppression: if no candidate passed threshold, but best candidate has score >= 0.52, accept top-1
+                    for sid in b_df["entity_id"]:
+                        if not b_matches[sid] and sid in b_best_cand:
+                            best_sc, best_cid = b_best_cand[sid]
+                            if best_sc >= 0.52:
+                                b_matches[sid].append(best_cid)
+                                country_matches_found += 1
                             
                 # 4. Stream write immediately to disk
                 for sid in b_df["entity_id"]:
@@ -381,7 +417,7 @@ def run_test_inference_and_validate():
                     log(f"    Progress [{country.upper()}]: {b_en:,}/{n_c_s1:,} S1 entities processed (Matches found: {country_matches_found:,})")
                     
         log(f"  Completed country '{country}' in {time.time()-c_t0:.1f}s. Matches: {country_matches_found:,}")
-        del cand_dict, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, c_s1
+        del cand_dict, idx_addr_num_street, idx_addr_num_post, idx_name_sorted, idx_tok01, idx_tok0_post, idx_tok0_num, idx_pref4, c_s1
         gc.collect()
         
     del s1_df
