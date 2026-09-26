@@ -2,8 +2,10 @@
 Amazon ML Challenge 2026: Fast, Robust Test Inference Module
 ============================================================
 Processes all 1,732,544 test S1 entities across France, US, and India.
-Uses memory-efficient country partitioning and multi-strategy candidate blocking.
-Produces valid output/matching_results.tsv and output/candidate_pairs.tsv.
+Uses memory-efficient country partitioning, fast candidate blocking,
+and streaming incremental output writing.
+Outputs matching_results.tsv and candidate_pairs.tsv to both student_resource
+and AmazonMLChallenge directories, verified with official validate_submission.py.
 """
 
 import os
@@ -11,6 +13,7 @@ import sys
 import gc
 import re
 import time
+import shutil
 import pickle
 import subprocess
 from pathlib import Path
@@ -20,14 +23,18 @@ import numpy as np
 import pandas as pd
 from rapidfuzz.distance import Levenshtein, JaroWinkler
 
-BASE_DIR = Path(".")
+BASE_DIR = Path("c:/ml challenge/student_resource")
 TEST_DIR = BASE_DIR / "dataset/test"
 OUT_DIR = BASE_DIR / "output"
+OUT_DIR_ROOT = Path("c:/ml challenge/output")
+OUT_DIR_GIT = Path("c:/ml challenge/AmazonMLChallenge/output")
 ART_DIR = BASE_DIR / "artifacts"
 MODEL_PATH = ART_DIR / "models/lgbm_model.pkl"
 THRESH_PATH = ART_DIR / "models/threshold.pkl"
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR_ROOT.mkdir(parents=True, exist_ok=True)
+OUT_DIR_GIT.mkdir(parents=True, exist_ok=True)
 
 def log(*args, **kwargs):
     print(*args, **kwargs, flush=True)
@@ -87,7 +94,7 @@ def build_country_blocking_indexes(s2_df: pd.DataFrame, s3_df: pd.DataFrame):
                 
     return idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3
 
-def retrieve_candidates_batch(s1_batch: pd.DataFrame, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=20):
+def retrieve_candidates_batch(s1_batch: pd.DataFrame, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=12):
     eids = s1_batch["entity_id"].values
     nns = s1_batch["nn"].values
     tok0s = s1_batch["tok0"].values
@@ -106,20 +113,20 @@ def retrieve_candidates_batch(s1_batch: pd.DataFrame, idx_tok0, idx_tok01, idx_p
         
         c_set = set()
         if t0:
-            c_set.update(idx_tok0.get(t0, [])[:15])
+            c_set.update(idx_tok0.get(t0, [])[:10])
             
         toks = name.split(maxsplit=2)
         if len(toks) >= 2:
-            c_set.update(idx_tok01.get(f"{toks[0]}|{toks[1]}", [])[:10])
+            c_set.update(idx_tok01.get(f"{toks[0]}|{toks[1]}", [])[:8])
             
         if p4:
-            c_set.update(idx_pref4.get(p4, [])[:10])
+            c_set.update(idx_pref4.get(p4, [])[:8])
             
         if post:
-            c_set.update(idx_postal.get(post, [])[:10])
+            c_set.update(idx_postal.get(post, [])[:8])
             
         if len(c_set) == 0 and p3:
-            c_set.update(idx_pref3.get(p3, [])[:8])
+            c_set.update(idx_pref3.get(p3, [])[:6])
             
         candidates[sid] = list(c_set)[:max_per_s1]
         
@@ -168,37 +175,41 @@ def compute_pairwise_features_fast(s1_dict, cand_dict, candidate_map):
         cid = pairs[i][1]
         
         # Name similarity
-        if n1 and n1 == n2:
+        if n1 == n2:
             n_exact[i] = 1; n_lev[i] = 1.0; n_jw[i] = 1.0; n_jac[i] = 1.0; n_cgram[i] = 1.0; len_n_ratio[i] = 1.0
         else:
-            n_lev[i] = Levenshtein.normalized_similarity(n1, n2)
+            nl = Levenshtein.normalized_similarity(n1, n2)
+            n_lev[i] = nl
             n_jw[i] = JaroWinkler.similarity(n1, n2)
-            t1, t2 = set(n1.split()), set(n2.split())
-            u = t1 | t2
-            n_jac[i] = len(t1 & t2) / len(u) if u else 0.0
-            g1 = {n1[k:k+3] for k in range(len(n1)-2)}
-            g2 = {n2[k:k+3] for k in range(len(n2)-2)}
-            gu = g1 | g2
-            n_cgram[i] = len(g1 & g2) / len(gu) if gu else 0.0
             l1, l2 = len(n1), len(n2)
             len_n_ratio[i] = min(l1, l2) / max(l1, l2) if max(l1, l2) > 0 else 1.0
-            
+            if nl > 0.2:
+                t1, t2 = set(n1.split()), set(n2.split())
+                u = t1 | t2
+                n_jac[i] = len(t1 & t2) / len(u) if u else 0.0
+                g1 = {n1[k:k+3] for k in range(l1-2)}
+                g2 = {n2[k:k+3] for k in range(l2-2)}
+                gu = g1 | g2
+                n_cgram[i] = len(g1 & g2) / len(gu) if gu else 0.0
+                
         # Address similarity
-        if a1 and a1 == a2:
+        if a1 == a2:
             a_exact[i] = 1; a_lev[i] = 1.0; a_jw[i] = 1.0; a_jac[i] = 1.0; a_cgram[i] = 1.0; len_a_ratio[i] = 1.0
         else:
-            a_lev[i] = Levenshtein.normalized_similarity(a1, a2)
+            al = Levenshtein.normalized_similarity(a1, a2)
+            a_lev[i] = al
             a_jw[i] = JaroWinkler.similarity(a1, a2)
-            at1, at2 = set(a1.split()), set(a2.split())
-            au = at1 | at2
-            a_jac[i] = len(at1 & at2) / len(au) if au else 0.0
-            ag1 = {a1[k:k+3] for k in range(len(a1)-2)}
-            ag2 = {a2[k:k+3] for k in range(len(a2)-2)}
-            agu = ag1 | ag2
-            a_cgram[i] = len(ag1 & ag2) / len(agu) if agu else 0.0
             al1, al2 = len(a1), len(a2)
             len_a_ratio[i] = min(al1, al2) / max(al1, al2) if max(al1, al2) > 0 else 1.0
-            
+            if al > 0.2:
+                at1, at2 = set(a1.split()), set(a2.split())
+                au = at1 | at2
+                a_jac[i] = len(at1 & at2) / len(au) if au else 0.0
+                ag1 = {a1[k:k+3] for k in range(al1-2)}
+                ag2 = {a2[k:k+3] for k in range(al2-2)}
+                agu = ag1 | ag2
+                a_cgram[i] = len(ag1 & ag2) / len(agu) if agu else 0.0
+                
         c_exact[i] = 1 if (c1 and c1 == c2) else 0
         post_exact[i] = 1 if (p1 and p1 == p2) else 0
         
@@ -249,9 +260,17 @@ def run_test_inference_and_validate():
     countries = s1_df["nc"].unique()
     log(f"  Detected countries in test S1: {list(countries)}")
     
-    # Prepare global dictionaries for results
-    test_matches = defaultdict(list)
-    test_candidates = defaultdict(list)
+    # Initialize output TSVs with exact headers
+    match_file = OUT_DIR / "matching_results.tsv"
+    cand_file = OUT_DIR / "candidate_pairs.tsv"
+    
+    with open(match_file, "w", encoding="utf-8") as f_m, open(cand_file, "w", encoding="utf-8") as f_c:
+        f_m.write("source1_entity_id\tmatched_entity_ids\n")
+        f_c.write("source1_entity_id\tcandidate_entity_ids\n")
+        
+    total_matches_written = 0
+    total_singletons_written = 0
+    total_entities_written = 0
     
     # 3. Country Partitioned Processing
     for country in countries:
@@ -261,7 +280,8 @@ def run_test_inference_and_validate():
         log("-" * 60)
         
         c_s1 = s1_df[s1_df["nc"] == country].reset_index(drop=True)
-        log(f"  Country '{country}': {len(c_s1):,} S1 entities")
+        n_c_s1 = len(c_s1)
+        log(f"  Country '{country}': {n_c_s1:,} S1 entities")
         
         # Load only matching country rows from test_source2 and test_source3
         log(f"  Loading test_source2 for '{country}'...")
@@ -287,7 +307,13 @@ def run_test_inference_and_validate():
         log(f"  Loaded country candidates: S2={len(c_s2):,}, S3={len(c_s3):,}")
         
         if len(c_s2) == 0 and len(c_s3) == 0:
-            log(f"  Warning: No S2/S3 candidates found for country '{country}'. S1 will be singletons.")
+            log(f"  Warning: No S2/S3 candidates found for country '{country}'. Writing all as singletons.")
+            with open(match_file, "a", encoding="utf-8") as f_m, open(cand_file, "a", encoding="utf-8") as f_c:
+                for sid in c_s1["entity_id"]:
+                    f_m.write(f"{sid}\t\n")
+                    f_c.write(f"{sid}\t\n")
+                    total_singletons_written += 1
+                    total_entities_written += 1
             continue
             
         c_s2 = preprocess_df(c_s2)
@@ -300,76 +326,80 @@ def run_test_inference_and_validate():
         # Build inverted blocking indexes
         log(f"  Building blocking indexes for '{country}'...")
         idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3 = build_country_blocking_indexes(c_s2, c_s3)
-        del c_s2, c_s3
+        del c_s2, c_s3, c_all_cands_df
         gc.collect()
         
-        # Batch inference on c_s1
+        # Batch inference on c_s1 with immediate streaming write to disk
         batch_size = 25_000
-        n_c_s1 = len(c_s1)
         country_matches_found = 0
         
-        for b_st in range(0, n_c_s1, batch_size):
-            b_en = min(b_st + batch_size, n_c_s1)
-            b_df = c_s1.iloc[b_st:b_en]
-            
-            # 1. Retrieve candidates
-            c_map = retrieve_candidates_batch(b_df, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=20)
-            for sid, c_list in c_map.items():
-                test_candidates[sid] = c_list
+        with open(match_file, "a", encoding="utf-8") as f_m, open(cand_file, "a", encoding="utf-8") as f_c:
+            for b_st in range(0, n_c_s1, batch_size):
+                b_en = min(b_st + batch_size, n_c_s1)
+                b_df = c_s1.iloc[b_st:b_en]
                 
-            # 2. Fast feature extraction
-            s1_dict = b_df.set_index("entity_id")[["nn", "na", "nc", "postal"]].to_dict("index")
-            pairs, X = compute_pairwise_features_fast(s1_dict, cand_dict, c_map)
-            
-            # 3. Model scoring
-            if X is not None and len(X) > 0:
-                scores = model.predict_proba(X)[:, 1]
-                for p_idx, score in enumerate(scores):
-                    if score >= threshold:
-                        sid, cid = pairs[p_idx]
-                        test_matches[sid].append(cid)
-                        country_matches_found += 1
+                # 1. Retrieve candidates
+                c_map = retrieve_candidates_batch(b_df, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, max_per_s1=12)
+                
+                # 2. Fast feature extraction
+                s1_dict = b_df.set_index("entity_id")[["nn", "na", "nc", "postal"]].to_dict("index")
+                pairs, X = compute_pairwise_features_fast(s1_dict, cand_dict, c_map)
+                
+                # 3. Model scoring
+                b_matches = defaultdict(list)
+                if X is not None and len(X) > 0:
+                    scores = model.predict_proba(X)[:, 1]
+                    for p_idx, score in enumerate(scores):
+                        if score >= threshold:
+                            sid, cid = pairs[p_idx]
+                            b_matches[sid].append(cid)
+                            country_matches_found += 1
+                            
+                # 4. Stream write immediately to disk
+                for sid in b_df["entity_id"]:
+                    total_entities_written += 1
+                    # Candidate pairs line
+                    c_list = sorted(list(set(c_map.get(sid, []))))
+                    if c_list:
+                        f_c.write(f"{sid}\t{','.join(c_list)}\n")
+                    else:
+                        f_c.write(f"{sid}\t\n")
                         
-            if b_en % 50_000 == 0 or b_en == n_c_s1:
-                log(f"    Progress [{country.upper()}]: {b_en:,}/{n_c_s1:,} S1 entities processed (Matches found: {country_matches_found:,})")
+                    # Matching results line
+                    m_list = sorted(list(set(b_matches.get(sid, []))))
+                    if m_list:
+                        total_matches_written += 1
+                        f_m.write(f"{sid}\t{','.join(m_list)}\n")
+                    else:
+                        total_singletons_written += 1
+                        f_m.write(f"{sid}\t\n")
+                        
+                f_m.flush()
+                f_c.flush()
                 
+                if b_en % 50_000 == 0 or b_en == n_c_s1:
+                    log(f"    Progress [{country.upper()}]: {b_en:,}/{n_c_s1:,} S1 entities processed (Matches found: {country_matches_found:,})")
+                    
         log(f"  Completed country '{country}' in {time.time()-c_t0:.1f}s. Matches: {country_matches_found:,}")
-        del cand_dict, c_all_cands_df, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, c_s1
+        del cand_dict, idx_tok0, idx_tok01, idx_pref4, idx_postal, idx_pref3, c_s1
         gc.collect()
         
     del s1_df
     gc.collect()
     
-    # 4. Write Submission Files
-    match_file = OUT_DIR / "matching_results.tsv"
-    cand_file = OUT_DIR / "candidate_pairs.tsv"
+    log(f"\n[2] Generation Complete:")
+    log(f"  Total S1 rows written:       {total_entities_written:,}")
+    log(f"  Total matched entities:      {total_matches_written:,}")
+    log(f"  Total singleton entities:    {total_singletons_written:,}")
     
-    log(f"\n[2] Writing matching_results.tsv to {match_file}...")
-    matched_s1_count = 0
-    with open(match_file, "w", encoding="utf-8") as f:
-        f.write("source1_entity_id\tmatched_entity_ids\n")
-        for sid in all_s1_ids:
-            m_list = sorted(list(set(test_matches.get(sid, []))))
-            if m_list:
-                matched_s1_count += 1
-                f.write(f"{sid}\t{','.join(m_list)}\n")
-            else:
-                f.write(f"{sid}\t\n")
-                
-    log(f"  matching_results.tsv complete: {matched_s1_count:,} non-singleton entities, {total_s1 - matched_s1_count:,} singletons.")
-    
-    log(f"\n[3] Writing candidate_pairs.tsv to {cand_file}...")
-    with open(cand_file, "w", encoding="utf-8") as f:
-        f.write("source1_entity_id\tcandidate_entity_ids\n")
-        for sid in all_s1_ids:
-            c_list = sorted(list(set(test_candidates.get(sid, []))))
-            if c_list:
-                f.write(f"{sid}\t{','.join(c_list)}\n")
-            else:
-                f.write(f"{sid}\t\n")
-                
-    log(f"  candidate_pairs.tsv complete.")
-    
+    # 4. Copy to all required locations (both inside student_resource and outside/Git)
+    log(f"\n[3] Copying output files to all targets...")
+    for target_dir in (OUT_DIR_ROOT, OUT_DIR_GIT):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(match_file, target_dir / "matching_results.tsv")
+        shutil.copy2(cand_file, target_dir / "candidate_pairs.tsv")
+        log(f"  Copied to: {target_dir}")
+        
     # 5. Run Official Submission Validator
     log(f"\n[4] Running official submission validator...")
     validator_cmd = [
@@ -380,17 +410,18 @@ def run_test_inference_and_validate():
         "--test-dir", str(TEST_DIR)
     ]
     log(f"  Command: {' '.join(validator_cmd)}")
-    res = subprocess.run(validator_cmd, capture_output=True, text=True)
+    res = subprocess.run(validator_cmd, capture_output=True, text=True, cwd=str(BASE_DIR))
     log(res.stdout)
     if res.stderr:
         log("Validator stderr:", res.stderr)
         
+    is_pass = res.returncode == 0 and "PASS" in res.stdout
     log("=" * 70)
     log(f"  TOTAL INFERENCE & VALIDATION TIME: {time.time()-t_start:.1f}s ({int((time.time()-t_start)//60)}m {int((time.time()-t_start)%60)}s)")
-    log(f"  VALIDATOR RESULT: {'PASS' if res.returncode == 0 and 'PASS' in res.stdout else 'FAIL'}")
+    log(f"  VALIDATOR RESULT: {'PASS' if is_pass else 'FAIL'}")
     log("=" * 70)
     
-    return res.returncode == 0 and "PASS" in res.stdout
+    return is_pass
 
 if __name__ == "__main__":
     success = run_test_inference_and_validate()
