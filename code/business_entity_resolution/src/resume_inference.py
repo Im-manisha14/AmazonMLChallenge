@@ -1,14 +1,14 @@
 """
-Amazon ML Challenge 2026: Optimized V2 Ensemble Test Inference
-==============================================================
-Uses the V2 Ensemble (0.5 LGB + 0.5 XGB) with 26 features and τ=0.93.
-Optimizations & Domain Fixes:
-  - Vectorized and cached feature extraction (23,000+ pairs/sec)
-  - Blazing fast dictionary building with zip (<3s instead of 30 min)
-  - French diacritics normalization (NFKD unicode strip) so accented names match
-  - French street word extraction (skips rue, avenue, bd prefixes to hit true street name)
-  - Threshold 0.93 to protect precision under F0.5 evaluation
-  - Memory-efficient country partitioning and stream writing
+Amazon ML Challenge 2026: Resume Inference Pipeline & Auto Git Push
+===================================================================
+Resumes test inference for the remaining 269,986 India entities (indices 540,000 to 809,986).
+Appends results directly to matching_results.tsv and candidate_pairs.tsv.
+Once completed:
+  1. Verifies 1,732,544 total entities
+  2. Copies output files to AmazonMLChallenge/output and c:/ml challenge/output
+  3. Copies updated code to AmazonMLChallenge/code
+  4. Runs official validate_submission.py
+  5. Performs git commit and push to origin/main
 """
 
 import os
@@ -32,16 +32,13 @@ TEST_DIR = BASE_DIR / "dataset/test"
 OUT_DIR = BASE_DIR / "output"
 OUT_DIR_ROOT = Path("c:/ml challenge/output")
 OUT_DIR_GIT = Path("c:/ml challenge/AmazonMLChallenge/output")
+GIT_REPO_DIR = Path("c:/ml challenge/AmazonMLChallenge")
 ART_DIR = BASE_DIR / "artifacts"
 
 # V2 Models
 LGB_MODEL_PATH = ART_DIR / "models/lgbm_matcher_v2.pkl"
 XGB_MODEL_PATH = ART_DIR / "models/xgb_matcher_v2.pkl"
 THRESH_PATH = ART_DIR / "models/best_threshold.pkl"
-
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_DIR_ROOT.mkdir(parents=True, exist_ok=True)
-OUT_DIR_GIT.mkdir(parents=True, exist_ok=True)
 
 def log(*args, **kwargs):
     print(*args, **kwargs, flush=True)
@@ -54,13 +51,6 @@ FRENCH_PREFIXES = {
     'impasse', 'place', 'pl', 'allee', 'route', 'rte', 'cours', 'quai',
     'square', 'sq', 'passage', 'bis', 'ter', 'de', 'du', 'des', 'la',
     'le', 'les', 'd', 'l'
-}
-
-STOPWORDS = {
-    "the", "and", "of", "in", "at", "for", "on", "a", "an", "to",
-    "co", "inc", "corp", "corporation", "ltd", "limited", "pvt", "private",
-    "llc", "llp", "sa", "sas", "sarl", "enterprises", "solutions", "services",
-    "group", "company", "holdings", "holding", "hotel", "restaurant", "store"
 }
 
 def clean_series(s: pd.Series) -> pd.Series:
@@ -363,7 +353,6 @@ def compute_v2_features_fast(s1, cand, cand_id):
     ]
 
 def compute_v2_features_batch(s1_meta_dict, cand_raw_dict, cand_meta_cache, candidate_map):
-    """Compute V2 features for a batch of (S1, candidate) pairs."""
     pairs = []
     features = []
     
@@ -392,12 +381,12 @@ def compute_v2_features_batch(s1_meta_dict, cand_raw_dict, cand_meta_cache, cand
     return pairs, X
 
 # ============================================================
-# MAIN INFERENCE
+# RESUME INFERENCE & AUTO GIT PUSH
 # ============================================================
-def run_test_inference_v2():
+def resume_inference():
     t_start = time.time()
     log("=" * 70)
-    log("  AMAZON ML CHALLENGE: FAST V2 ENSEMBLE TEST INFERENCE")
+    log("  AMAZON ML CHALLENGE: RESUMING INFERENCE FOR INDIA (540,000 -> 809,986)")
     log("  Model: 0.5*LGB + 0.5*XGB | Features: 26 | Threshold: 0.93")
     log("=" * 70)
     
@@ -414,184 +403,179 @@ def run_test_inference_v2():
     log(f"  Loaded XGB model: {type(xgb_model).__name__}")
     log(f"  Decision Threshold: {threshold}")
     
-    # 2. Load Test S1
-    log(f"\n[1] Reading test_source1.tsv...")
-    s1_df = pd.read_csv(TEST_DIR / "test_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
-    all_s1_ids = s1_df["entity_id"].tolist()
-    total_s1 = len(all_s1_ids)
-    log(f"  Total test S1 entities: {total_s1:,}")
-    
-    s1_raw = s1_df.copy()
-    s1_df = preprocess_df(s1_df)
-    countries = s1_df["nc"].unique()
-    log(f"  Detected countries: {list(countries)}")
-    
-    # Initialize output
+    # 2. Check current output lines
     match_file = OUT_DIR / "matching_results.tsv"
     cand_file = OUT_DIR / "candidate_pairs.tsv"
     
-    with open(match_file, "w", encoding="utf-8") as f_m, open(cand_file, "w", encoding="utf-8") as f_c:
-        f_m.write("source1_entity_id\tmatched_entity_ids\n")
-        f_c.write("source1_entity_id\tcandidate_entity_ids\n")
+    with open(match_file, "r", encoding="utf-8") as f:
+        f.readline()
+        existing_matches = sum(1 for _ in f)
+    log(f"  Current rows in matching_results.tsv: {existing_matches:,}")
     
-    total_matches_written = 0
-    total_singletons_written = 0
-    total_entities_written = 0
+    START_INDEX = 540_000
+    expected_before_resume = 663_106 + 259_452 + START_INDEX
+    if existing_matches != expected_before_resume:
+        log(f"  WARNING: existing matches {existing_matches} != expected {expected_before_resume}")
     
-    # 3. Country Partitioned Processing
-    for country in countries:
-        c_t0 = time.time()
-        log(f"\n" + "-" * 60)
-        log(f"  PROCESSING COUNTRY: '{country.upper()}'")
-        log("-" * 60)
-        
-        c_mask = s1_df["nc"] == country
-        c_s1 = s1_df[c_mask].reset_index(drop=True)
-        c_s1_raw = s1_raw[c_mask].reset_index(drop=True)
-        n_c_s1 = len(c_s1)
-        log(f"  Country '{country}': {n_c_s1:,} S1 entities")
-        
-        # Load country-filtered S2 and S3
-        log(f"  Loading test_source2 for '{country}'...")
-        s2_chunks = []
-        for chunk in pd.read_csv(TEST_DIR / "test_source2.tsv", sep="\t", dtype=str, keep_default_na=False, chunksize=500_000):
-            sub = chunk[chunk["country"].str.lower().str.strip() == country]
-            if len(sub) > 0:
-                s2_chunks.append(sub)
-        c_s2_raw = pd.concat(s2_chunks, ignore_index=True) if s2_chunks else pd.DataFrame(columns=["entity_id", "business_name", "business_address", "country"])
-        del s2_chunks
-        gc.collect()
-        
-        log(f"  Loading test_source3 for '{country}'...")
-        s3_chunks = []
-        for chunk in pd.read_csv(TEST_DIR / "test_source3.tsv", sep="\t", dtype=str, keep_default_na=False, chunksize=500_000):
-            sub = chunk[chunk["country"].str.lower().str.strip() == country]
-            if len(sub) > 0:
-                s3_chunks.append(sub)
-        c_s3_raw = pd.concat(s3_chunks, ignore_index=True) if s3_chunks else pd.DataFrame(columns=["entity_id", "business_name", "business_address", "country"])
-        del s3_chunks
-        gc.collect()
-        
-        log(f"  Loaded: S2={len(c_s2_raw):,}, S3={len(c_s3_raw):,}")
-        
-        if len(c_s2_raw) == 0 and len(c_s3_raw) == 0:
-            log(f"  Warning: No candidates for '{country}'. All singletons.")
-            with open(match_file, "a", encoding="utf-8") as f_m, open(cand_file, "a", encoding="utf-8") as f_c:
-                for sid in c_s1["entity_id"]:
-                    f_m.write(f"{sid}\t\n")
-                    f_c.write(f"{sid}\t\n")
-                    total_singletons_written += 1
-                    total_entities_written += 1
-            continue
-        
-        # Build candidate raw lookup dict using fast zip (<3 seconds)
-        log(f"  Building candidate lookup dict...")
-        t_dict0 = time.time()
-        cand_raw_dict = {}
-        for eid, bn, ba, co in zip(c_s2_raw["entity_id"], c_s2_raw["business_name"], c_s2_raw["business_address"], c_s2_raw["country"]):
-            cand_raw_dict[eid] = (bn, ba, co)
-        for eid, bn, ba, co in zip(c_s3_raw["entity_id"], c_s3_raw["business_name"], c_s3_raw["business_address"], c_s3_raw["country"]):
-            cand_raw_dict[eid] = (bn, ba, co)
-        log(f"  Candidate lookup built in {time.time()-t_dict0:.2f}s ({len(cand_raw_dict):,} entries)")
-        
-        # Preprocess candidates for blocking
-        log(f"  Preprocessing candidates for blocking indexes...")
-        c_s2_prep = preprocess_df(c_s2_raw)
-        c_s3_prep = preprocess_df(c_s3_raw)
-        del c_s2_raw, c_s3_raw
-        gc.collect()
-        
-        # Build blocking indexes
-        log(f"  Building blocking indexes...")
-        indexes = build_country_blocking_indexes(c_s2_prep, c_s3_prep)
-        del c_s2_prep, c_s3_prep
-        gc.collect()
-        
-        # On-demand candidate meta cache (reset per country)
-        cand_meta_cache = {}
-        
-        # Batch inference
-        batch_size = 20_000
-        country_matches_found = 0
-        
-        with open(match_file, "a", encoding="utf-8") as f_m, open(cand_file, "a", encoding="utf-8") as f_c:
-            for b_st in range(0, n_c_s1, batch_size):
-                b_en = min(b_st + batch_size, n_c_s1)
-                b_df = c_s1.iloc[b_st:b_en]
-                b_raw = c_s1_raw.iloc[b_st:b_en]
-                
-                # 1. Retrieve candidates
-                c_map = retrieve_candidates_batch(b_df, *indexes, max_per_s1=15)
-                
-                # 2. Build S1 meta dict for this batch using fast zip
-                s1_meta_dict = {}
-                for eid, bn, ba, co in zip(b_raw["entity_id"], b_raw["business_name"], b_raw["business_address"], b_raw["country"]):
-                    s1_meta_dict[eid] = extract_meta_fast(bn, ba, co)
-                
-                # 3. Fast V2 feature extraction (26 features)
-                pairs, X = compute_v2_features_batch(s1_meta_dict, cand_raw_dict, cand_meta_cache, c_map)
-                
-                # 4. Ensemble scoring
-                b_matches = defaultdict(list)
-                if X is not None and len(X) > 0:
-                    lgb_scores = lgb_model.predict_proba(X)[:, 1]
-                    xgb_scores = xgb_model.predict_proba(X)[:, 1]
-                    ensemble_scores = 0.5 * lgb_scores + 0.5 * xgb_scores
-                    
-                    for p_idx, score in enumerate(ensemble_scores):
-                        sid, cid = pairs[p_idx]
-                        if score >= threshold:
-                            b_matches[sid].append(cid)
-                            country_matches_found += 1
-                
-                # 5. Stream write
-                for sid in b_df["entity_id"]:
-                    total_entities_written += 1
-                    c_list = sorted(list(set(c_map.get(sid, []))))
-                    if c_list:
-                        f_c.write(f"{sid}\t{','.join(c_list)}\n")
-                    else:
-                        f_c.write(f"{sid}\t\n")
-                    
-                    m_list = sorted(list(set(b_matches.get(sid, []))))
-                    if m_list:
-                        total_matches_written += 1
-                        f_m.write(f"{sid}\t{','.join(m_list)}\n")
-                    else:
-                        total_singletons_written += 1
-                        f_m.write(f"{sid}\t\n")
-                
-                f_m.flush()
-                f_c.flush()
-                
-                if b_en % 40_000 == 0 or b_en == n_c_s1:
-                    elapsed = time.time() - c_t0
-                    rate = b_en / elapsed if elapsed > 0 else 0
-                    log(f"    [{country.upper()}] {b_en:,}/{n_c_s1:,} ({rate:.0f} S1/s) | Matches: {country_matches_found:,} | Cached: {len(cand_meta_cache):,}")
-        
-        log(f"  Done '{country}' in {time.time()-c_t0:.1f}s | Matches: {country_matches_found:,}")
-        del cand_raw_dict, cand_meta_cache, indexes, c_s1, c_s1_raw
-        gc.collect()
+    # 3. Load India S1 Entities
+    log(f"\n[1] Reading test_source1.tsv for India...")
+    s1_df = pd.read_csv(TEST_DIR / "test_source1.tsv", sep="\t", dtype=str, keep_default_na=False)
+    s1_df["nc"] = s1_df["country"].fillna("").astype(str).str.lower().str.strip()
     
-    del s1_df, s1_raw
+    india_mask = s1_df["nc"] == "india"
+    c_s1_full = s1_df[india_mask].reset_index(drop=True)
+    c_s1_full_raw = c_s1_full.copy()
+    c_s1_full = preprocess_df(c_s1_full)
+    
+    total_india = len(c_s1_full)
+    log(f"  Total India S1 entities: {total_india:,}")
+    log(f"  Resuming from index: {START_INDEX:,} to {total_india:,} ({total_india - START_INDEX:,} entities remaining)")
+    
+    # Slice the remaining entities
+    c_s1 = c_s1_full.iloc[START_INDEX:].reset_index(drop=True)
+    c_s1_raw = c_s1_full_raw.iloc[START_INDEX:].reset_index(drop=True)
+    n_c_s1 = len(c_s1)
+    
+    del s1_df, c_s1_full, c_s1_full_raw
     gc.collect()
     
-    log(f"\n[2] Generation Complete:")
-    log(f"  Total S1 rows:      {total_entities_written:,}")
-    log(f"  Matched entities:   {total_matches_written:,}")
-    log(f"  Singletons:         {total_singletons_written:,}")
-    log(f"  Singleton rate:     {total_singletons_written/total_entities_written:.2%}")
+    # 4. Load India S2 and S3
+    log(f"\n[2] Loading test_source2 for 'india'...")
+    s2_chunks = []
+    for chunk in pd.read_csv(TEST_DIR / "test_source2.tsv", sep="\t", dtype=str, keep_default_na=False, chunksize=500_000):
+        sub = chunk[chunk["country"].str.lower().str.strip() == "india"]
+        if len(sub) > 0:
+            s2_chunks.append(sub)
+    c_s2_raw = pd.concat(s2_chunks, ignore_index=True) if s2_chunks else pd.DataFrame(columns=["entity_id", "business_name", "business_address", "country"])
+    del s2_chunks
+    gc.collect()
     
-    # Copy to all target locations
-    log(f"\n[3] Copying output files...")
+    log(f"  Loading test_source3 for 'india'...")
+    s3_chunks = []
+    for chunk in pd.read_csv(TEST_DIR / "test_source3.tsv", sep="\t", dtype=str, keep_default_na=False, chunksize=500_000):
+        sub = chunk[chunk["country"].str.lower().str.strip() == "india"]
+        if len(sub) > 0:
+            s3_chunks.append(sub)
+    c_s3_raw = pd.concat(s3_chunks, ignore_index=True) if s3_chunks else pd.DataFrame(columns=["entity_id", "business_name", "business_address", "country"])
+    del s3_chunks
+    gc.collect()
+    
+    log(f"  Loaded: S2={len(c_s2_raw):,}, S3={len(c_s3_raw):,}")
+    
+    # Build candidate lookup dict
+    log(f"  Building candidate lookup dict...")
+    t_dict0 = time.time()
+    cand_raw_dict = {}
+    for eid, bn, ba, co in zip(c_s2_raw["entity_id"], c_s2_raw["business_name"], c_s2_raw["business_address"], c_s2_raw["country"]):
+        cand_raw_dict[eid] = (bn, ba, co)
+    for eid, bn, ba, co in zip(c_s3_raw["entity_id"], c_s3_raw["business_name"], c_s3_raw["business_address"], c_s3_raw["country"]):
+        cand_raw_dict[eid] = (bn, ba, co)
+    log(f"  Candidate lookup built in {time.time()-t_dict0:.2f}s ({len(cand_raw_dict):,} entries)")
+    
+    # Preprocess candidates for blocking
+    log(f"  Preprocessing candidates for blocking indexes...")
+    c_s2_prep = preprocess_df(c_s2_raw)
+    c_s3_prep = preprocess_df(c_s3_raw)
+    del c_s2_raw, c_s3_raw
+    gc.collect()
+    
+    # Build blocking indexes
+    log(f"  Building blocking indexes...")
+    indexes = build_country_blocking_indexes(c_s2_prep, c_s3_prep)
+    del c_s2_prep, c_s3_prep
+    gc.collect()
+    
+    cand_meta_cache = {}
+    
+    # 5. Batch inference appending to files
+    batch_size = 20_000
+    resumed_matches_found = 0
+    resumed_entities_written = 0
+    c_t0 = time.time()
+    
+    log(f"\n[3] Processing batches in append mode...")
+    with open(match_file, "a", encoding="utf-8") as f_m, open(cand_file, "a", encoding="utf-8") as f_c:
+        for b_st in range(0, n_c_s1, batch_size):
+            b_en = min(b_st + batch_size, n_c_s1)
+            b_df = c_s1.iloc[b_st:b_en]
+            b_raw = c_s1_raw.iloc[b_st:b_en]
+            
+            # Retrieve candidates
+            c_map = retrieve_candidates_batch(b_df, *indexes, max_per_s1=15)
+            
+            # S1 meta dict
+            s1_meta_dict = {}
+            for eid, bn, ba, co in zip(b_raw["entity_id"], b_raw["business_name"], b_raw["business_address"], b_raw["country"]):
+                s1_meta_dict[eid] = extract_meta_fast(bn, ba, co)
+            
+            # Features
+            pairs, X = compute_v2_features_batch(s1_meta_dict, cand_raw_dict, cand_meta_cache, c_map)
+            
+            # Scoring
+            b_matches = defaultdict(list)
+            if X is not None and len(X) > 0:
+                lgb_scores = lgb_model.predict_proba(X)[:, 1]
+                xgb_scores = xgb_model.predict_proba(X)[:, 1]
+                ensemble_scores = 0.5 * lgb_scores + 0.5 * xgb_scores
+                
+                for p_idx, score in enumerate(ensemble_scores):
+                    sid, cid = pairs[p_idx]
+                    if score >= threshold:
+                        b_matches[sid].append(cid)
+                        resumed_matches_found += 1
+            
+            # Stream write
+            for sid in b_df["entity_id"]:
+                resumed_entities_written += 1
+                c_list = sorted(list(set(c_map.get(sid, []))))
+                if c_list:
+                    f_c.write(f"{sid}\t{','.join(c_list)}\n")
+                else:
+                    f_c.write(f"{sid}\t\n")
+                
+                m_list = sorted(list(set(b_matches.get(sid, []))))
+                if m_list:
+                    f_m.write(f"{sid}\t{','.join(m_list)}\n")
+                else:
+                    f_m.write(f"{sid}\t\n")
+            
+            f_m.flush()
+            f_c.flush()
+            
+            elapsed = time.time() - c_t0
+            rate = b_en / elapsed if elapsed > 0 else 0
+            log(f"    [INDIA-RESUME] {b_en:,}/{n_c_s1:,} ({rate:.0f} S1/s) | New Matches: {resumed_matches_found:,} | Cached: {len(cand_meta_cache):,}")
+    
+    del cand_raw_dict, cand_meta_cache, indexes, c_s1, c_s1_raw
+    gc.collect()
+    
+    # 6. Verification of total output rows
+    with open(match_file, "r", encoding="utf-8") as f:
+        f.readline()
+        final_total = sum(1 for _ in f)
+    
+    log(f"\n[4] Complete! Final total S1 rows in matching_results.tsv: {final_total:,}")
+    assert final_total == 1_732_544, f"Expected 1,732,544 rows but got {final_total:,}!"
+    log("  ✅ Full 1,732,544 S1 test entities verified!")
+    
+    # 7. Copy output files to all targets
+    log(f"\n[5] Copying output files to targets...")
     for target_dir in (OUT_DIR_ROOT, OUT_DIR_GIT):
         target_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(match_file, target_dir / "matching_results.tsv")
         shutil.copy2(cand_file, target_dir / "candidate_pairs.tsv")
-        log(f"  Copied to: {target_dir}")
+        log(f"  Copied output files to: {target_dir}")
+        
+    # Copy code files to AmazonMLChallenge git repo
+    git_code_dir = GIT_REPO_DIR / "code/business_entity_resolution/src"
+    git_code_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(BASE_DIR / "code/business_entity_resolution/src/test_inference_v2.py", git_code_dir / "test_inference_v2.py")
+    shutil.copy2(BASE_DIR / "code/business_entity_resolution/src/test_inference_v2.py", git_code_dir / "test_inference.py")
+    shutil.copy2(BASE_DIR / "code/business_entity_resolution/src/resume_inference.py", git_code_dir / "resume_inference.py")
+    log(f"  Copied updated inference code to git repo code directory.")
     
-    # Run validator
-    log(f"\n[4] Running official submission validator...")
+    # 8. Run official validator
+    log(f"\n[6] Running official submission validator...")
     validator_cmd = [
         sys.executable,
         "utils/validate_submission.py",
@@ -605,13 +589,36 @@ def run_test_inference_v2():
         log("Validator stderr:", res.stderr)
     
     is_pass = res.returncode == 0 and "PASS" in res.stdout
-    log("=" * 70)
-    log(f"  TOTAL TIME: {time.time()-t_start:.1f}s ({int((time.time()-t_start)//60)}m {int((time.time()-t_start)%60)}s)")
-    log(f"  VALIDATOR: {'PASS' if is_pass else 'FAIL'}")
-    log("=" * 70)
+    log(f"  VALIDATOR RESULT: {'PASS' if is_pass else 'FAIL'}")
     
-    return is_pass
+    if not is_pass:
+        log("  ❌ Validator failed! Aborting git push.")
+        return False
+        
+    # 9. Git Add, Commit, and Push
+    log(f"\n[7] Pushing to Git repository (origin main)...")
+    git_cmds = [
+        ["git", "add", "code/business_entity_resolution/src/test_inference.py", "code/business_entity_resolution/src/test_inference_v2.py", "code/business_entity_resolution/src/resume_inference.py"],
+        ["git", "commit", "-m", "fix: V2 ensemble inference with French domain fixes and optimal precision threshold tau=0.93"],
+        ["git", "push", "origin", "main"]
+    ]
+    
+    for cmd in git_cmds:
+        log(f"  Running: {' '.join(cmd)}")
+        git_res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(GIT_REPO_DIR))
+        log(git_res.stdout)
+        if git_res.stderr:
+            log(git_res.stderr)
+        if git_res.returncode != 0:
+            log(f"  Git command failed with code {git_res.returncode}")
+            return False
+            
+    log("=" * 70)
+    log(f"  SUCCESS! All 1,732,544 entities processed, verified, and pushed to Git.")
+    log(f"  TOTAL RESUME TIME: {time.time()-t_start:.1f}s ({int((time.time()-t_start)//60)}m {int((time.time()-t_start)%60)}s)")
+    log("=" * 70)
+    return True
 
 if __name__ == "__main__":
-    success = run_test_inference_v2()
-    sys.exit(0 if success else 1)
+    ok = resume_inference()
+    sys.exit(0 if ok else 1)
