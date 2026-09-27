@@ -44,7 +44,11 @@ OUT_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 OUT_DIR_GIT.mkdir(parents=True, exist_ok=True)
 
 def log(*args, **kwargs):
-    print(*args, **kwargs, flush=True)
+    try:
+        print(*args, **kwargs, flush=True)
+    except UnicodeEncodeError:
+        safe_args = [str(a).encode('ascii', 'replace').decode('ascii') for a in args]
+        print(*safe_args, **kwargs, flush=True)
 
 # ============================================================
 # PREPROCESSING & BLOCKING

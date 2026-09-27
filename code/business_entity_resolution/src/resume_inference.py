@@ -41,7 +41,11 @@ XGB_MODEL_PATH = ART_DIR / "models/xgb_matcher_v2.pkl"
 THRESH_PATH = ART_DIR / "models/best_threshold.pkl"
 
 def log(*args, **kwargs):
-    print(*args, **kwargs, flush=True)
+    try:
+        print(*args, **kwargs, flush=True)
+    except UnicodeEncodeError:
+        safe_args = [str(a).encode('ascii', 'replace').decode('ascii') for a in args]
+        print(*safe_args, **kwargs, flush=True)
 
 # ============================================================
 # PREPROCESSING & BLOCKING
@@ -556,7 +560,7 @@ def resume_inference():
     
     log(f"\n[4] Complete! Final total S1 rows in matching_results.tsv: {final_total:,}")
     assert final_total == 1_732_544, f"Expected 1,732,544 rows but got {final_total:,}!"
-    log("  ✅ Full 1,732,544 S1 test entities verified!")
+    log("  [OK] Full 1,732,544 S1 test entities verified!")
     
     # 7. Copy output files to all targets
     log(f"\n[5] Copying output files to targets...")
@@ -592,7 +596,7 @@ def resume_inference():
     log(f"  VALIDATOR RESULT: {'PASS' if is_pass else 'FAIL'}")
     
     if not is_pass:
-        log("  ❌ Validator failed! Aborting git push.")
+        log("  [ERROR] Validator failed! Aborting git push.")
         return False
         
     # 9. Git Add, Commit, and Push
